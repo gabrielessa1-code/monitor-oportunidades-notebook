@@ -14,7 +14,7 @@ PRECO_MAXIMO = 4500.0
 
 FONTES_OLX = [
     {
-        "url": "https://www.olx.com.br/informatica/notebooks/estado-sp/sao-paulo-e-regiao?sf=1",
+        "url": "https://sp.olx.com.br/sao-paulo-e-regiao/informatica/notebooks?sf=1",
         "tipo": "NOTEBOOK",
         "modalidade": "SP / DDD 11 (Presencial)"
     },
@@ -24,7 +24,7 @@ FONTES_OLX = [
         "modalidade": "Brasil com Entrega OLX"
     },
     {
-        "url": "https://www.olx.com.br/games/consoles-de-video-game/estado-sp/sao-paulo-e-regiao?sf=1",
+        "url": "https://sp.olx.com.br/sao-paulo-e-regiao/games/consoles-de-video-game?sf=1",
         "tipo": "GAME",
         "modalidade": "SP / DDD 11 (Presencial)"
     },
@@ -77,14 +77,17 @@ def salvar_vistos(vistos):
     with open(ARQUIVO_VISTOS, "w", encoding="utf-8") as f:
         json.dump(vistos_lista, f, indent=2)
 
-def ler_via_jina(url, timeout=25):
-    try:
-        resp = requests.get(f"https://r.jina.ai/{url}", timeout=timeout)
-        if resp.status_code == 200:
-            return resp.text
-        print(f"  [HTTP {resp.status_code}] {url}")
-    except Exception as e:
-        print(f"  [Erro Jina] {url}: {e}")
+def ler_via_jina(url, timeout=25, tentativas=2):
+    for tentativa in range(tentativas):
+        try:
+            resp = requests.get(f"https://r.jina.ai/{url}", timeout=timeout)
+            if resp.status_code == 200 and len(resp.text) > 2000:
+                return resp.text
+            if tentativa < tentativas - 1:
+                time.sleep(3)
+        except Exception as e:
+            print(f"  [Erro Jina] {url}: {e}")
+            time.sleep(2)
     return ""
 
 def extrair_anuncios_categoria(texto, tipo, modalidade):
@@ -151,6 +154,7 @@ def coletar_por_categorias():
             print(f"[{fonte['tipo']} | {fonte['modalidade']}] Lendo página {pagina}...")
             texto = ler_via_jina(url, timeout=25)
             if not texto:
+                print("  -> Sem resposta válida nesta página.")
                 continue
 
             achados = extrair_anuncios_categoria(texto, fonte["tipo"], fonte["modalidade"])
@@ -161,12 +165,12 @@ def coletar_por_categorias():
                     candidatos.append(item)
                     novos += 1
             print(f"  -> Texto lido: {len(texto)} chars | Anúncios extraídos: {novos}")
-            time.sleep(0.6)
+            time.sleep(1.0)
 
     return candidatos
 
 def inspecionar_e_filtrar_descricao(item):
-    texto = ler_via_jina(item["link"], timeout=22)
+    texto = ler_via_jina(item["link"], timeout=22, tentativas=1)
     if not texto:
         return None
 
@@ -202,7 +206,7 @@ def inspecionar_e_filtrar_descricao(item):
         if not any(g in texto_lower for g in TERMOS_GAMES_ATUAIS):
             return None
 
-    item["descricao"] = texto_completo[:1300]
+    item["descricao"] = texto_completo[:900]
     return item
 
 def filtrar_com_ia(candidatos):
@@ -212,31 +216,26 @@ def filtrar_com_ia(candidatos):
 
     client = genai.Client(
         api_key=api_key,
-        http_options=types.HttpOptions(timeout=35000)
+        http_options=types.HttpOptions(timeout=65000)
     )
 
-    modelos_disponiveis = []
-    try:
-        for m in client.models.list():
-            nome = m.name.replace("models/", "")
-            if "flash" in nome and "image" not in nome and "audio" not in nome and "tts" not in nome:
-                modelos_disponiveis.append(nome)
-    except Exception:
-        pass
-
-    if not modelos_disponiveis:
-        modelos_disponiveis = ["gemini-2.5-flash"]
+    modelos_prioritarios = [
+        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.5-flash",
+        "gemini-3.1-flash-lite"
+    ]
 
     lista_texto = ""
     for i, item in enumerate(candidatos):
         lista_texto += (
             f"ID {i} | Tipo: {item['tipo']} | Modalidade: {item['modalidade']} | "
             f"Título: {item['titulo']} | Preço: R$ {item['preco']:.2f} | Local: {item['local']} | "
-            f"Descrição Completa: {item.get('descricao', '')}\n"
+            f"Descrição: {item.get('descricao', '')}\n"
         )
 
     prompt = f"""
-Você é um especialista em compra e revenda de hardware e games usados no Brasil (2026), analisando a descrição completa de anúncios da OLX.
+Você é um especialista em compra e revenda de hardware e games usados no Brasil (2026), analisando anúncios da OLX.
 
 APROVE ESTRITAMENTE APENAS ESTES DOIS PERFIS:
 1. NOTEBOOK (Tipo: NOTEBOOK): Precisa ter placa de vídeo NVIDIA (GTX/RTX/MX) ou AMD (Radeon/Ryzen Vega) E apresentar algum defeito na descrição (ex: tela quebrada, carcaça, teclado, bateria, problema de imagem/reparo) com preço atrativo que compense o conserto.
@@ -255,7 +254,7 @@ Responda APENAS com um array JSON válido (se nenhum valer a pena, retorne []):
   }}
 ]
 """
-    for modelo in modelos_disponiveis[:4]:
+    for modelo in modelos_prioritarios:
         try:
             print(f"Analisando {len(candidatos)} anúncios pré-filtrados com IA ({modelo})...")
             res = client.models.generate_content(
@@ -342,8 +341,8 @@ if __name__ == "__main__":
     print(f"Total após filtro de descrição (GPU+Defeito ou Game Atual): {len(pre_aprovados)}")
 
     oportunidades = []
-    for i in range(0, len(pre_aprovados), 15):
-        lote = pre_aprovados[i:i+15]
+    for i in range(0, len(pre_aprovados), 10):
+        lote = pre_aprovados[i:i+10]
         aprovados, sucesso = filtrar_com_ia(lote)
         if sucesso:
             oportunidades.extend(aprovados)
