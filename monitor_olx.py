@@ -14,22 +14,22 @@ PRECO_MAXIMO = 4500.0
 
 FONTES_OLX = [
     {
-        "url": "https://www.olx.com.br/computadores-e-acessorios/notebooks/estado-sp/sao-paulo-e-regiao?sf=1",
+        "url": "https://www.olx.com.br/informatica/notebooks/estado-sp/sao-paulo-e-regiao?sf=1",
         "tipo": "NOTEBOOK",
         "modalidade": "SP / DDD 11 (Presencial)"
     },
     {
-        "url": "https://www.olx.com.br/computadores-e-acessorios/notebooks?sd=1&sf=1",
+        "url": "https://www.olx.com.br/informatica/notebooks?sd=1&sf=1",
         "tipo": "NOTEBOOK",
         "modalidade": "Brasil com Entrega OLX"
     },
     {
-        "url": "https://www.olx.com.br/games/videogames/estado-sp/sao-paulo-e-regiao?sf=1",
+        "url": "https://www.olx.com.br/games/consoles-de-video-game/estado-sp/sao-paulo-e-regiao?sf=1",
         "tipo": "GAME",
         "modalidade": "SP / DDD 11 (Presencial)"
     },
     {
-        "url": "https://www.olx.com.br/games/videogames?sd=1&sf=1",
+        "url": "https://www.olx.com.br/games/consoles-de-video-game?sd=1&sf=1",
         "tipo": "GAME",
         "modalidade": "Brasil com Entrega OLX"
     }
@@ -82,26 +82,25 @@ def ler_via_jina(url, timeout=25):
         resp = requests.get(f"https://r.jina.ai/{url}", timeout=timeout)
         if resp.status_code == 200:
             return resp.text
+        print(f"  [HTTP {resp.status_code}] {url}")
     except Exception as e:
-        print(f"Erro ao ler {url}: {e}")
+        print(f"  [Erro Jina] {url}: {e}")
     return ""
 
 def extrair_anuncios_categoria(texto, tipo, modalidade):
     resultados = []
     links_vistos = set()
 
-    padrao_link = re.compile(r'\[([^\]]{8,180})\]\((https://[a-z0-9.-]*olx\.com\.br/[^\s\)]+-\d+)\)')
-    matches = list(padrao_link.finditer(texto))
+    padrao_url = re.compile(r'https://[a-z]{2}\.olx\.com\.br/[^\s\)\]]+-\d{7,}')
+    matches = list(padrao_url.finditer(texto))
 
     for i, m in enumerate(matches):
-        titulo_bruto = " ".join(m.group(1).split()).strip()
-        link = m.group(2).split("?")[0].strip()
-
-        if link in links_vistos or not re.search(r'-\d{8,}$', link):
+        link = m.group(0).split("?")[0].strip()
+        if link in links_vistos:
             continue
 
-        inicio_bloco = m.start()
-        fim_bloco = matches[i + 1].start() if i + 1 < len(matches) else min(len(texto), m.end() + 500)
+        inicio_bloco = max(0, m.start() - 180)
+        fim_bloco = matches[i + 1].start() if i + 1 < len(matches) else min(len(texto), m.end() + 450)
         bloco = texto[inicio_bloco:fim_bloco]
 
         m_preco = re.search(r'R\$\s*([\d\.]+)(?:,\d{2})?', bloco)
@@ -116,10 +115,8 @@ def extrair_anuncios_categoria(texto, tipo, modalidade):
         if not (PRECO_MINIMO <= preco <= PRECO_MAXIMO):
             continue
 
-        titulo_limpo = re.sub(r'^!\[.*?\]\(.*?\)\s*', '', titulo_bruto).strip()
-        if len(titulo_limpo) < 6:
-            slug = link.rstrip("/").split("/")[-1]
-            titulo_limpo = re.sub(r'-\d+$', '', slug).replace("-", " ").title()
+        slug = link.rstrip("/").split("/")[-1]
+        titulo_limpo = re.sub(r'-\d+$', '', slug).replace("-", " ").title()
 
         if any(b in titulo_limpo.lower() for b in PALAVRAS_BLOQUEIO):
             continue
@@ -163,7 +160,7 @@ def coletar_por_categorias():
                     links_unicos.add(item["link"])
                     candidatos.append(item)
                     novos += 1
-            print(f"  -> Anúncios extraídos: {novos}")
+            print(f"  -> Texto lido: {len(texto)} chars | Anúncios extraídos: {novos}")
             time.sleep(0.6)
 
     return candidatos
@@ -172,6 +169,10 @@ def inspecionar_e_filtrar_descricao(item):
     texto = ler_via_jina(item["link"], timeout=22)
     if not texto:
         return None
+
+    m_h1 = re.search(r'^#\s+(.+)$', texto, flags=re.MULTILINE)
+    if m_h1 and "olx" not in m_h1.group(1).lower():
+        item["titulo"] = m_h1.group(1).strip()[:160]
 
     linhas = [
         " ".join(l.split()) for l in texto.splitlines()
