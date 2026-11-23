@@ -1,0 +1,38 @@
+name: Monitor OLX Notebooks Defeito e Games
+
+on:
+  schedule:
+    - cron: '12,42 8-23 * * *'
+    - cron: '12,42 0-2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  buscar-olx:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Executar monitor OLX
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python -u monitor_olx.py
+
+      - name: Salvar histórico de vistos
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add vistos_olx.json
+          git commit -m "Atualiza vistos OLX" || exit 0
+          git push
