@@ -3,7 +3,6 @@ import json
 import os
 import re
 import time
-import urllib.parse
 import requests
 from google import genai
 from google.genai import types
@@ -13,33 +12,46 @@ ARQUIVO_VISTOS = "vistos_olx.json"
 PRECO_MINIMO = 150.0
 PRECO_MAXIMO = 4500.0
 
-REGIOES_OLX = [
-    "https://www.olx.com.br/estado-sp/sao-paulo-e-regiao/grande-abc",
-    "https://www.olx.com.br/estado-sp/sao-paulo-e-regiao"
+FONTES_OLX = [
+    {
+        "url": "https://www.olx.com.br/computadores-e-acessorios/notebooks/estado-sp/sao-paulo-e-regiao?sf=1",
+        "tipo": "NOTEBOOK",
+        "modalidade": "SP / DDD 11 (Presencial)"
+    },
+    {
+        "url": "https://www.olx.com.br/computadores-e-acessorios/notebooks?sd=1&sf=1",
+        "tipo": "NOTEBOOK",
+        "modalidade": "Brasil com Entrega OLX"
+    },
+    {
+        "url": "https://www.olx.com.br/games/videogames/estado-sp/sao-paulo-e-regiao?sf=1",
+        "tipo": "GAME",
+        "modalidade": "SP / DDD 11 (Presencial)"
+    },
+    {
+        "url": "https://www.olx.com.br/games/videogames?sd=1&sf=1",
+        "tipo": "GAME",
+        "modalidade": "Brasil com Entrega OLX"
+    }
 ]
 
-BUSCAS_NOTEBOOKS_DEFEITO = [
-    "notebook rtx defeito",
-    "notebook gtx defeito",
-    "notebook gamer defeito",
-    "notebook placa de video defeito",
-    "notebook rtx tela quebrada",
-    "notebook gtx tela quebrada",
-    "notebook gamer tela quebrada",
-    "notebook dedicado defeito",
-    "notebook placa integrada defeito",
-    "notebook radeon defeito"
+TERMOS_GPU = [
+    "nvidia", "geforce", "gtx", "rtx", "amd", "radeon", "vega",
+    "placa de video", "placa de vídeo", "dedicada", "gpu", "mx150", "mx250", "mx330", "mx350", "mx450"
 ]
 
-BUSCAS_GAMES_ATUAIS = [
-    "ps5",
-    "playstation 5",
-    "ps4",
-    "playstation 4",
-    "xbox series s",
-    "xbox series x",
-    "nintendo switch",
-    "steam deck"
+TERMOS_DEFEITO = [
+    "defeito", "quebrada", "quebrado", "trincada", "trincado", "avaria",
+    "não liga", "nao liga", "sem imagem", "não dá vídeo", "nao da video",
+    "conserto", "reparo", "manutenção", "manutencao", "técnico", "tecnico",
+    "peças", "pecas", "retirar", "tela ruim", "display", "dobradiça", "dobradica",
+    "carcaça", "carcaca", "bateria viciada", "não carrega", "nao carrega", "teclado falhando"
+]
+
+TERMOS_GAMES_ATUAIS = [
+    "ps5", "playstation 5", "ps4", "playstation 4",
+    "xbox series", "series s", "series x",
+    "nintendo switch", "switch oled", "switch lite", "steam deck"
 ]
 
 PALAVRAS_BLOQUEIO = [
@@ -61,7 +73,7 @@ def carregar_vistos():
     return set()
 
 def salvar_vistos(vistos):
-    vistos_lista = list(vistos)[-6000:]
+    vistos_lista = list(vistos)[-8000:]
     with open(ARQUIVO_VISTOS, "w", encoding="utf-8") as f:
         json.dump(vistos_lista, f, indent=2)
 
@@ -74,18 +86,18 @@ def ler_via_jina(url, timeout=25):
         print(f"Erro ao ler {url}: {e}")
     return ""
 
-def extrair_anuncios_listagem(texto):
+def extrair_anuncios_categoria(texto, tipo, modalidade):
     resultados = []
     links_vistos = set()
 
-    padrao_link = re.compile(r'\[([^\]]{10,160})\]\((https://[a-z0-9.-]*olx\.com\.br/[^\s\)]+-\d+)\)')
+    padrao_link = re.compile(r'\[([^\]]{8,180})\]\((https://[a-z0-9.-]*olx\.com\.br/[^\s\)]+-\d+)\)')
     matches = list(padrao_link.finditer(texto))
 
     for i, m in enumerate(matches):
         titulo_bruto = " ".join(m.group(1).split()).strip()
         link = m.group(2).split("?")[0].strip()
 
-        if link in links_vistos or "/d/" not in link and not re.search(r'-\d{8,}$', link):
+        if link in links_vistos or not re.search(r'-\d{8,}$', link):
             continue
 
         inicio_bloco = m.start()
@@ -112,59 +124,84 @@ def extrair_anuncios_listagem(texto):
         if any(b in titulo_limpo.lower() for b in PALAVRAS_BLOQUEIO):
             continue
 
-        m_local = re.search(r'((?:São Paulo|Santo André|São Bernardo|São Caetano|Diadema|Mauá|Ribeirão Pires|Guarulhos|Osasco|Barueri)[^\n|]{0,45})', bloco, flags=re.IGNORECASE)
-        local = " ".join(m_local.group(1).split()) if m_local else "Grande SP / ABC"
+        if tipo == "GAME":
+            if not any(g in titulo_limpo.lower() for g in TERMOS_GAMES_ATUAIS):
+                continue
+
+        m_local = re.search(r'([A-Za-zÀ-ÿ\s-]+-\s*[A-Z]{2}|(?:São Paulo|Santo André|São Bernardo|São Caetano|Diadema|Mauá|Guarulhos|Osasco|Barueri)[^\n|]{0,40})', bloco)
+        local = " ".join(m_local.group(1).split()) if m_local else modalidade
 
         links_vistos.add(link)
         resultados.append({
             "titulo": titulo_limpo[:160],
             "preco": preco,
             "local": local[:80],
+            "tipo": tipo,
+            "modalidade": modalidade,
             "link": link
         })
 
     return resultados
 
-def coletar_candidatos_olx():
+def coletar_por_categorias():
     candidatos = []
     links_unicos = set()
 
-    todas_buscas = [(kw, "NOTEBOOK COM DEFEITO") for kw in BUSCAS_NOTEBOOKS_DEFEITO] + [
-        (kw, "GAME ATUAL") for kw in BUSCAS_GAMES_ATUAIS
-    ]
-
-    for regiao in REGIOES_OLX:
-        for kw, categoria in todas_buscas:
-            q = urllib.parse.quote(kw)
-            url = f"{regiao}?q={q}&sf=1"
-            print(f"[OLX - {categoria}] Buscando '{kw}' em {regiao}...")
-            texto = ler_via_jina(url, timeout=22)
+    for fonte in FONTES_OLX:
+        url_base = fonte["url"]
+        for pagina in [1, 2]:
+            url = url_base if pagina == 1 else f"{url_base}&o={pagina}"
+            print(f"[{fonte['tipo']} | {fonte['modalidade']}] Lendo página {pagina}...")
+            texto = ler_via_jina(url, timeout=25)
             if not texto:
                 continue
 
-            achados = extrair_anuncios_listagem(texto)
+            achados = extrair_anuncios_categoria(texto, fonte["tipo"], fonte["modalidade"])
             novos = 0
             for item in achados:
                 if item["link"] not in links_unicos:
-                    item["categoria_busca"] = categoria
                     links_unicos.add(item["link"])
                     candidatos.append(item)
                     novos += 1
-            print(f"  -> Novos encontrados: {novos}")
-            time.sleep(0.5)
+            print(f"  -> Anúncios extraídos: {novos}")
+            time.sleep(0.6)
 
     return candidatos
 
-def inspecionar_detalhes_anuncio(item):
-    texto = ler_via_jina(item["link"], timeout=20)
+def inspecionar_e_filtrar_descricao(item):
+    texto = ler_via_jina(item["link"], timeout=22)
     if not texto:
-        return item
+        return None
 
     linhas = [
         " ".join(l.split()) for l in texto.splitlines()
-        if len(l.strip()) > 4 and not any(x in l.lower() for x in ["cookie", "dicas de segurança", "olx pay", "compartilhar", "denunciar"])
+        if len(l.strip()) > 3 and not any(
+            x in l.lower() for x in [
+                "cookie", "dicas de segurança", "compartilhar", "denunciar",
+                "publicidade", "política de privacidade", "todos os direitos"
+            ]
+        )
     ]
-    item["descricao"] = " | ".join(linhas)[:1000]
+    texto_completo = " | ".join(linhas)
+    texto_lower = texto_completo.lower()
+
+    if any(b in texto_lower for b in PALAVRAS_BLOQUEIO):
+        return None
+
+    if "Brasil com Entrega" in item["modalidade"]:
+        if not any(e in texto_lower for e in ["entrega", "envio", "olx pay", "frete"]):
+            return None
+
+    if item["tipo"] == "NOTEBOOK":
+        tem_gpu = any(g in texto_lower for g in TERMOS_GPU)
+        tem_defeito = any(d in texto_lower for d in TERMOS_DEFEITO)
+        if not (tem_gpu and tem_defeito):
+            return None
+    elif item["tipo"] == "GAME":
+        if not any(g in texto_lower for g in TERMOS_GAMES_ATUAIS):
+            return None
+
+    item["descricao"] = texto_completo[:1300]
     return item
 
 def filtrar_com_ia(candidatos):
@@ -192,35 +229,34 @@ def filtrar_com_ia(candidatos):
     lista_texto = ""
     for i, item in enumerate(candidatos):
         lista_texto += (
-            f"ID {i} | Categoria: {item['categoria_busca']} | Título: {item['titulo']} | "
-            f"Preço: R$ {item['preco']:.2f} | Local: {item['local']} | "
-            f"Detalhes: {item.get('descricao', '')}\n"
+            f"ID {i} | Tipo: {item['tipo']} | Modalidade: {item['modalidade']} | "
+            f"Título: {item['titulo']} | Preço: R$ {item['preco']:.2f} | Local: {item['local']} | "
+            f"Descrição Completa: {item.get('descricao', '')}\n"
         )
 
     prompt = f"""
-Você é um especialista em compra e revenda de hardware e games usados no Brasil (2026), avaliando anúncios da OLX em São Paulo/ABC.
+Você é um especialista em compra e revenda de hardware e games usados no Brasil (2026), analisando a descrição completa de anúncios da OLX.
 
-APROVE ESTRITAMENTE APENAS ESTES DOIS TIPOS DE ANÚNCIO:
-1. NOTEBOOKS COM PLACA DE VÍDEO (DEDICADA GTX/RTX/RADEON OU INTEGRADA DE BOM DESEMPENHO COMO RYZEN VEGA / INTEL IRIS XE) QUE TENHAM ALGUM DEFEITO FÍSICO/REPARÁVEL (ex: tela quebrada, teclado com falha, bateria viciada, carcaça trincada, sem carregador, problema de software) E ESTEJAM BARATOS O SUFICIENTE PARA VALER O CONSERTO/REVENDA.
-   - REJEITE notebooks funcionando perfeitamente a preço normal de mercado.
-   - REJEITE notebooks básicos antigos (Celeron, Pentium, Dual Core, Positivo, Multilaser) ou placas-mãe totalmente queimadas sem conserto.
-2. VÍDEO GAMES MAIS ATUAIS EM BOM ESTADO OU OPORTUNIDADE DE PREÇO: EXCLUSIVAMENTE PlayStation 5 (PS5), PlayStation 4 (PS4 Slim/Pro/Fat), Xbox Series S, Xbox Series X, Nintendo Switch (V1, V2, OLED, Lite) e Steam Deck.
-   - REJEITE consoles antigos (PS3, PS2, Xbox 360, Xbox One, Wii), controles avulsos, jogos avulsos, caixas vazias ou acessórios isolados.
+APROVE ESTRITAMENTE APENAS ESTES DOIS PERFIS:
+1. NOTEBOOK (Tipo: NOTEBOOK): Precisa ter placa de vídeo NVIDIA (GTX/RTX/MX) ou AMD (Radeon/Ryzen Vega) E apresentar algum defeito na descrição (ex: tela quebrada, carcaça, teclado, bateria, problema de imagem/reparo) com preço atrativo que compense o conserto.
+   - REJEITE notebooks sem defeito ou com CPU básica antiga (Celeron, Pentium, Dual Core, Positivo, Multilaser).
+2. GAME ATUAL (Tipo: GAME): Precisa ser console completo (PS5, PS4, Xbox Series S/X, Nintendo Switch ou Steam Deck) com bom preço ou oportunidade de revenda.
+   - REJEITE controles avulsos, jogos avulsos, caixas vazias ou consoles antigos (PS3, Xbox 360, Xbox One).
 
-Anúncios coletados:
+Anúncios pré-filtrados pela descrição:
 {lista_texto}
 
-Responda APENAS com um array JSON válido (se nenhum atender rigorosamente aos critérios acima, retorne []):
+Responda APENAS com um array JSON válido (se nenhum valer a pena, retorne []):
 [
   {{
     "id": 0,
-    "motivo": "Tipo (Notebook c/ Defeito ou Console Atual) | Estado relatado | Média de mercado vs Preço anunciado e margem estimada"
+    "motivo": "GPU/Modelo e Defeito identificado na descrição (ou Console) | Média de mercado vs Preço anunciado e margem estimada"
   }}
 ]
 """
     for modelo in modelos_disponiveis[:4]:
         try:
-            print(f"Analisando {len(candidatos)} anúncios da OLX com IA ({modelo})...")
+            print(f"Analisando {len(candidatos)} anúncios pré-filtrados com IA ({modelo})...")
             res = client.models.generate_content(
                 model=modelo,
                 contents=prompt,
@@ -251,13 +287,14 @@ def enviar_telegram(achados):
     for item in achados:
         titulo_esc = html.escape(item["titulo"])
         local_esc = html.escape(item["local"])
-        cat_esc = html.escape(item["categoria_busca"])
+        mod_esc = html.escape(item["modalidade"])
+        tipo_esc = html.escape(item["tipo"])
         motivo_esc = html.escape(item["motivo"])
         link_esc = html.escape(item["link"])
         preco_fmt = f"R$ {item['preco']:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
         mensagem = (
-            f"🎯 <b>OLX SP/ABC - {cat_esc}</b>\n\n"
+            f"🎯 <b>OLX - {tipo_esc} ({mod_esc})</b>\n\n"
             f"📦 <b>Anúncio:</b> {titulo_esc}\n"
             f"💰 <b>Preço:</b> {preco_fmt}\n"
             f"📍 <b>Local:</b> {local_esc}\n\n"
@@ -287,21 +324,25 @@ def enviar_telegram(achados):
 
 if __name__ == "__main__":
     vistos = carregar_vistos()
-    todos_candidatos = coletar_candidatos_olx()
+    todos_candidatos = coletar_por_categorias()
 
     novos = [c for c in todos_candidatos if c["link"] not in vistos]
-    print(f"Total de anúncios inéditos para inspecionar: {len(novos)}")
+    print(f"Total de anúncios inéditos nas categorias: {len(novos)}")
 
-    detalhados = []
-    for item in novos[:50]:
+    pre_aprovados = []
+    for item in novos[:80]:
         vistos.add(item["link"])
-        detalhado = inspecionar_detalhes_anuncio(item)
-        detalhados.append(detalhado)
-        time.sleep(0.4)
+        resultado = inspecionar_e_filtrar_descricao(item)
+        if resultado:
+            print(f"  [MATCH DESCRIÇÃO] {resultado['tipo']} | {resultado['titulo'][:45]} | R$ {resultado['preco']:.2f}")
+            pre_aprovados.append(resultado)
+        time.sleep(0.35)
+
+    print(f"Total após filtro de descrição (GPU+Defeito ou Game Atual): {len(pre_aprovados)}")
 
     oportunidades = []
-    for i in range(0, len(detalhados), 15):
-        lote = detalhados[i:i+15]
+    for i in range(0, len(pre_aprovados), 15):
+        lote = pre_aprovados[i:i+15]
         aprovados, sucesso = filtrar_com_ia(lote)
         if sucesso:
             oportunidades.extend(aprovados)
